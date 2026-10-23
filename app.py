@@ -1,43 +1,51 @@
 
 import re
+import random
+from pathlib import Path
+
 import streamlit as st
 import pandas as pd
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
-# --------------------------------------------------
-# APP CONFIGURATION
-# --------------------------------------------------
+
+# =========================================================
+# 1. APP CONFIGURATION
+# =========================================================
 
 st.set_page_config(
     page_title="P&L Financial Chatbot",
     page_icon="📊",
-    layout="wide"
+    layout="wide",
 )
 
-st.title("📊 P&L Financial Chatbot")
+st.title("📊 P&L Financial Assistant")
 st.caption(
-    "Ask questions about revenue, expenses, profitability, "
-    "account balances, and financial performance."
+    "Your conversational assistant for revenue, expenses, "
+    "profitability, and account balances. No AI API required."
 )
 
-# --------------------------------------------------
-# LOAD EXCEL DATA
-# --------------------------------------------------
 
-FILE_PATH = "sample_pnl.xlsx"
+# =========================================================
+# 2. LOAD EXCEL DATA
+# =========================================================
+
+FILE_PATH = Path(__file__).parent / "sample_pnl.xlsx"
 
 try:
     df = pd.read_excel(FILE_PATH)
+
 except FileNotFoundError:
     st.error(
-        "sample_pnl.xlsx was not found. "
-        "Upload it to your project directory."
+        "I couldn't find sample_pnl.xlsx. "
+        "Please add it to the same folder as app.py."
     )
     st.stop()
+
 except Exception as exc:
     st.error(f"Unable to read the Excel file: {exc}")
     st.stop()
+
 
 required_columns = {"Account", "Amount"}
 
@@ -48,9 +56,20 @@ if not required_columns.issubset(df.columns):
     )
     st.stop()
 
+
 df = df.copy()
-df["Account"] = df["Account"].fillna("").astype(str).str.strip()
-df["Amount"] = pd.to_numeric(df["Amount"], errors="coerce")
+
+df["Account"] = (
+    df["Account"]
+    .fillna("")
+    .astype(str)
+    .str.strip()
+)
+
+df["Amount"] = pd.to_numeric(
+    df["Amount"], errors="coerce"
+)
+
 df = df.dropna(subset=["Amount"])
 df = df[df["Account"] != ""]
 
@@ -58,41 +77,40 @@ if df.empty:
     st.warning("No valid financial records were found.")
     st.stop()
 
-# --------------------------------------------------
-# ACCOUNT CLASSIFICATION
-# Customize these patterns to match your chart of accounts.
-# --------------------------------------------------
+
+# =========================================================
+# 3. ACCOUNT CLASSIFICATION
+# =========================================================
 
 REVENUE_RE = re.compile(
     r"\b(revenue|sales|turnover|service income|"
-    r"sales returns?|discounts? given|allowances)\b",
-    re.I
-)
-
-EXPENSE_RE = re.compile(
-    r"\b(expense|expenses|cost of sales|cost of goods sold|"
-    r"cogs|salary|salaries|wages|rent|utilities|"
-    r"marketing|advertising|insurance|depreciation|"
-    r"professional fees|office supplies|travel|"
-    r"repairs|maintenance|freight|payroll|"
-    r"interest expense|bank charges|commission expense)\b",
-    re.I
+    r"sales income|sales returns?|discounts? given|"
+    r"sales discounts?|allowances)\b",
+    re.I,
 )
 
 CONTRA_REVENUE_RE = re.compile(
     r"\b(sales returns?|returns and allowances|"
     r"discounts? given|sales discounts?)\b",
-    re.I
+    re.I,
 )
 
 COGS_RE = re.compile(
     r"\b(cost of sales|cost of goods sold|cogs)\b",
-    re.I
+    re.I,
+)
+
+EXPENSE_RE = re.compile(
+    r"\b(expense|expenses|salary|salaries|wages|"
+    r"rent|utilities|marketing|advertising|insurance|"
+    r"depreciation|professional fees|office supplies|"
+    r"travel|repairs|maintenance|freight|payroll|"
+    r"interest expense|bank charges|commission expense)\b",
+    re.I,
 )
 
 
 def classify_account(account):
-    """Assign a broad financial category using account names."""
     name = account.lower()
 
     if CONTRA_REVENUE_RE.search(name):
@@ -112,36 +130,54 @@ def classify_account(account):
 
 df["Category"] = df["Account"].apply(classify_account)
 
-# Assumption:
-# Revenue is positive and expenses are negative.
-# If your workbook uses the opposite convention, configure the
-# normalization functions below to match your accounting system.
+
+# =========================================================
+# 4. FINANCIAL CALCULATIONS
+# =========================================================
+
+# Default assumptions:
+# Revenue and contra-revenue are stored as signed amounts.
+# Revenue is normally positive; returns may be negative.
+# Expenses and cost of sales are normally negative.
+#
+# If your Excel uses a different sign convention, change
+# these functions to match your source accounting system.
+
 
 def revenue_total():
+    """Net revenue, including signed contra-revenue."""
     return df.loc[
-        df["Category"].isin(["Revenue", "Contra-revenue"]),
-        "Amount"
+        df["Category"].isin(
+            ["Revenue", "Contra-revenue"]
+        ),
+        "Amount",
     ].sum()
 
 
 def expense_total():
-    # Return a positive expense figure for display.
+    """Return classified expenses as a positive figure."""
     return -df.loc[
-        df["Category"].isin(["Expense", "Cost of sales"]),
-        "Amount"
+        df["Category"].isin(
+            ["Expense", "Cost of sales"]
+        ),
+        "Amount",
     ].sum()
 
 
 def cost_of_sales():
     return -df.loc[
-        df["Category"] == "Cost of sales", "Amount"
+        df["Category"] == "Cost of sales",
+        "Amount",
     ].sum()
 
 
 def net_income():
-    # Assumes this worksheet contains only relevant P&L accounts
-    # and the source amounts already have their correct signs.
+    """Sum all source rows; validate the P&L scope first."""
     return df["Amount"].sum()
+
+
+def gross_profit():
+    return revenue_total() - cost_of_sales()
 
 
 def money(value):
@@ -152,40 +188,77 @@ def percent(value):
     return f"{value:.2f}%"
 
 
-# --------------------------------------------------
-# NATURAL-LANGUAGE INTENT DETECTION
-# --------------------------------------------------
+def net_margin():
+    revenue = revenue_total()
+
+    if revenue == 0:
+        return None
+
+    return net_income() / revenue * 100
+
+
+# =========================================================
+# 5. NATURAL-LANGUAGE NORMALIZATION
+# =========================================================
 
 def normalize(text):
-    """Normalize common conversational wording."""
-    text = text.lower().strip()
+    text = str(text).lower().strip()
     text = text.replace("&", " and ")
-    text = re.sub(r"[$,?!.]", " ", text)
-    text = re.sub(r"\b(what's|whats)\b", "what is", text)
-    text = re.sub(r"\b(how's|hows)\b", "how is", text)
-    text = re.sub(r"\b(made|earned)\b", "profit", text)
-    text = re.sub(r"\b(spent|spending)\b", "expense", text)
-    text = re.sub(r"\b(costs|cost)\b", "expense", text)
-    text = re.sub(r"\b(money coming in)\b", "revenue", text)
+
+    text = re.sub(
+        r"\bwhat's\b|\bwhats\b",
+        "what is",
+        text,
+    )
+
+    text = re.sub(
+        r"\bhow's\b|\bhows\b",
+        "how is",
+        text,
+    )
+
+    text = re.sub(r"[$,?!]", " ", text)
+
+    replacements = {
+        r"\bmoney coming in\b": "revenue",
+        r"\bsales income\b": "revenue",
+        r"\bturnover\b": "revenue",
+        r"\bbottom line\b": "net income",
+        r"\bnet profit\b": "net income",
+        r"\bbusiness profit\b": "net income",
+        r"\bprofit margin\b": "net margin",
+        r"\bhow much did we spend\b": "total expenses",
+        r"\bwhere is our money going\b": "expense breakdown",
+        r"\bbiggest costs\b": "top expenses",
+        r"\blargest costs\b": "top expenses",
+        r"\bdoing financially\b": "financial performance",
+        r"\bshow me the top three\b": "show me the top 3",
+    }
+
+    for pattern, replacement in replacements.items():
+        text = re.sub(pattern, replacement, text)
+
     return re.sub(r"\s+", " ", text).strip()
 
+
+# =========================================================
+# 6. INTENT DETECTION
+# =========================================================
 
 def detect_intent(question):
     q = normalize(question)
 
-    # Order matters: check specific questions before general ones.
+    # Specific intents must be checked before general intents.
 
     if re.search(
-        r"\b(top|largest|biggest|highest|most expensive|"
-        r"rank|ranking)\b", q
-    ) and re.search(r"\b(expense|account|cost|spend)\b", q):
-        return "top_expenses"
-
-    if re.search(
-        r"\b(profit margin|net margin|margin percentage|"
-        r"profitability ratio|percentage of revenue)\b", q
+        r"\b(top|largest|biggest|highest|"
+        r"most expensive|rank|ranking)\b",
+        q,
+    ) and re.search(
+        r"\b(expense|expenses|account|cost|spend)\b",
+        q,
     ):
-        return "profit_margin"
+        return "top_expenses"
 
     if re.search(
         r"\b(gross profit|gross margin)\b", q
@@ -193,65 +266,85 @@ def detect_intent(question):
         return "gross_profit"
 
     if re.search(
-        r"\b(net income|net profit|bottom line|"
-        r"business profit|overall profit|"
-        r"how profitable|making a profit|"
-        r"are we profitable|is the business profitable)\b", q
-    ) or q in {"profit", "profitability"}:
+        r"\b(net margin|margin percentage|"
+        r"net profit margin|profitability ratio)\b",
+        q,
+    ):
+        return "profit_margin"
+
+    if re.search(
+        r"\b(net income|net profit|overall profit|"
+        r"business profit|profitability|"
+        r"are we profitable|is the business profitable|"
+        r"making a profit|losing money|"
+        r"negative profit|break even|break-even)\b",
+        q,
+    ) or q in {"profit", "profit?"}:
         return "net_income"
 
     if re.search(
-        r"\b(total revenue|net revenue|revenue|sales|"
-        r"turnover|income from sales)\b", q
+        r"\b(expense breakdown|expense categories|"
+        r"breakdown|distribution|by category|"
+        r"compare categories)\b",
+        q,
     ):
-        return "revenue"
-
-    if re.search(
-        r"\b(total expenses|all expenses|operating expenses|"
-        r"total expense|how much did we spend|"
-        r"expense total|overall expenses)\b", q
-    ):
-        return "expenses"
+        return "breakdown"
 
     if re.search(
         r"\b(summarize|summary|overview|analyze|analyse|"
         r"financial performance|business performance|"
         r"how is the business doing|"
-        r"explain the pnl|explain the p and l)\b", q
+        r"how are we doing|explain the pnl|"
+        r"explain the p and l)\b",
+        q,
     ):
         return "summary"
 
     if re.search(
-        r"\b(compare|breakdown|distribution|"
-        r"by category|expense categories)\b", q
+        r"\b(total expenses|all expenses|"
+        r"operating expenses|total expense|"
+        r"expense total|overall expenses|"
+        r"how much did we spend)\b",
+        q,
     ):
-        return "breakdown"
+        return "expenses"
 
     if re.search(
-        r"\b(loss|losing money|negative profit)\b", q
+        r"\b(total revenue|net revenue|revenue|"
+        r"sales|turnover|income from sales)\b",
+        q,
     ):
-        return "net_income"
+        return "revenue"
+
+    if re.search(r"\b(hello|hi|hey|good morning|"
+                 r"good afternoon|good evening)\b", q):
+        return "greeting"
+
+    if re.search(
+        r"\b(thank you|thanks|thank you very much)\b",
+        q,
+    ):
+        return "thanks"
 
     return "account"
 
 
-# --------------------------------------------------
-# ACCOUNT SEARCH
-# --------------------------------------------------
+# =========================================================
+# 7. ACCOUNT MATCHING
+# =========================================================
 
-# Build the model from account names and individual words.
-# Character n-grams help match wording variations and typos.
+account_names = df["Account"].drop_duplicates().tolist()
 
-account_text = (
-    df["Account"].str.lower()
-    + " "
-    + df["Account"].str.lower().str.replace(r"[^a-z0-9 ]", " ", regex=True)
-)
+account_text = [
+    name.lower() + " " +
+    re.sub(r"[^a-z0-9 ]", " ", name.lower())
+    for name in account_names
+]
 
 vectorizer = TfidfVectorizer(
     analyzer="char_wb",
     ngram_range=(2, 5),
-    min_df=1
+    min_df=1,
 )
 
 account_matrix = vectorizer.fit_transform(account_text)
@@ -260,153 +353,197 @@ account_matrix = vectorizer.fit_transform(account_text)
 def find_account(question):
     q = normalize(question)
 
-    # Try exact or partial account-name matching first.
+    # Remove common conversational words before matching.
     q_clean = re.sub(r"[^a-z0-9 ]", " ", q)
     q_clean = re.sub(r"\s+", " ", q_clean).strip()
 
-    exact_matches = df[
-        df["Account"].str.lower().apply(
-            lambda name: (
-                name == q_clean
-                or (len(q_clean) >= 4 and q_clean in name)
-            )
-        )
+    ignored_words = {
+        "what", "is", "the", "our", "my", "how",
+        "much", "about", "please", "show", "me",
+        "tell", "give", "account", "amount", "balance",
+        "in", "for", "of", "do", "we", "have",
+        "can", "you", "check", "look", "up",
+    }
+
+    meaningful_words = [
+        word for word in q_clean.split()
+        if word not in ignored_words
     ]
 
-    if not exact_matches.empty:
-        return exact_matches.iloc[0]["Account"], 1.0
+    search_text = " ".join(meaningful_words)
 
+    if not search_text:
+        return None, 0.0, []
+
+    # Exact matching first.
+    exact = [
+        name for name in account_names
+        if name.lower() == search_text
+    ]
+
+    if exact:
+        return exact[0], 1.0, exact
+
+    # Partial matching.
+    partial = [
+        name for name in account_names
+        if len(search_text) >= 4
+        and search_text in name.lower()
+    ]
+
+    if len(partial) == 1:
+        return partial[0], 0.95, partial
+
+    # Fuzzy matching using TF-IDF.
     scores = cosine_similarity(
-        vectorizer.transform([q]), account_matrix
+        vectorizer.transform([search_text]),
+        account_matrix,
     ).flatten()
 
-    best_index = scores.argmax()
-    return df.iloc[best_index]["Account"], scores[best_index]
+    ranked_indices = scores.argsort()[::-1]
+
+    best_index = ranked_indices[0]
+    best_score = float(scores[best_index])
+
+    candidates = [
+        account_names[i]
+        for i in ranked_indices[:3]
+        if scores[i] >= 0.15
+    ]
+
+    # Similarity scores are not calibrated probabilities.
+    return (
+        account_names[best_index],
+        best_score,
+        candidates,
+    )
 
 
-# --------------------------------------------------
-# FINANCIAL ANALYSIS
-# --------------------------------------------------
+# =========================================================
+# 8. EXPENSE ANALYSIS
+# =========================================================
 
 def top_expense_accounts(limit=5):
     expenses = df[
-        df["Category"].isin(["Expense", "Cost of sales"])
+        df["Category"].isin(
+            ["Expense", "Cost of sales"]
+        )
     ].copy()
 
     if expenses.empty:
         return expenses
 
+    # Group repeated account names before ranking.
     expenses["Expense amount"] = -expenses["Amount"]
-    expenses = expenses.sort_values(
-        "Expense amount", ascending=False
+
+    expenses = (
+        expenses.groupby("Account", as_index=False)
+        .agg({"Expense amount": "sum"})
+        .sort_values(
+            "Expense amount",
+            ascending=False,
+        )
     )
 
     return expenses.head(limit)
 
 
-def financial_summary():
+# =========================================================
+# 9. CONVERSATIONAL RESPONSES
+# =========================================================
+
+def conversational_answer(intent):
     revenue = revenue_total()
     expenses = expense_total()
     profit = net_income()
 
-    if revenue != 0:
-        margin = profit / revenue * 100
-    else:
-        margin = None
-
-    lines = [
-        f"**Revenue:** {money(revenue)}",
-        f"**Expenses (excluding separately classified "
-        f"contra-revenue):** {money(expenses)}",
-        f"**Net P&L balance:** {money(profit)}",
-    ]
-
-    if margin is not None:
-        lines.append(f"**Net margin:** {percent(margin)}")
-    else:
-        lines.append(
-            "**Net margin:** Not available because revenue is zero."
+    if intent == "greeting":
+        return (
+            "Hi there! 👋 I'm your P&L assistant. "
+            "What would you like to explore today? "
+            "I can help with revenue, expenses, profit, "
+            "margins, and individual accounts."
         )
 
-    if profit > 0:
-        lines.append("The net P&L balance is positive.")
-    elif profit < 0:
-        lines.append("The net P&L balance is negative.")
-    else:
-        lines.append("The net P&L balance is zero.")
-
-    if expenses > 0:
-        top = top_expense_accounts(3)
-        if not top.empty:
-            names = ", ".join(top["Account"].tolist())
-            lines.append(f"**Largest classified expense accounts:** {names}")
-
-    lines.append(
-        "_Check that all P&L accounts are included and that "
-        "revenue and expense signs match your workbook's convention._"
-    )
-
-    return "\n\n".join(lines)
-
-
-def answer_question(question):
-    intent = detect_intent(question)
-    revenue = revenue_total()
-    expenses = expense_total()
-    profit = net_income()
+    if intent == "thanks":
+        return (
+            "You're welcome! 😊 Feel free to ask me "
+            "anything else about your P&L."
+        )
 
     if intent == "revenue":
-        return f"**Total revenue:** {money(revenue)}"
+        return random.choice([
+            f"Your net classified revenue is {money(revenue)}.",
+            f"Looking at the P&L, net revenue comes to {money(revenue)}.",
+            f"We have {money(revenue)} in net classified revenue.",
+        ])
 
     if intent == "expenses":
-        return f"**Total classified expenses:** {money(expenses)}"
+        return random.choice([
+            f"Your classified expenses total {money(expenses)}.",
+            f"Based on the current data, expenses come to {money(expenses)}.",
+            f"We've recorded {money(expenses)} in classified expenses.",
+        ])
 
     if intent == "net_income":
         if profit > 0:
-            status = "positive net P&L balance"
+            explanation = (
+                "The overall source balance is positive, "
+                "assuming the workbook contains the relevant "
+                "P&L accounts and consistent accounting signs."
+            )
         elif profit < 0:
-            status = "negative net P&L balance"
+            explanation = (
+                "The overall source balance is negative. "
+                "It is worth checking the expense and revenue "
+                "signs and confirming that all relevant accounts "
+                "are included."
+            )
         else:
-            status = "break-even net P&L balance"
+            explanation = (
+                "The overall source balance is zero. "
+                "This indicates break-even only if the workbook "
+                "contains the complete P&L."
+            )
 
         return (
-            f"**Net P&L balance:** {money(profit)}\n\n"
-            f"The current data indicates a {status}. "
-            "This assumes all rows are relevant P&L accounts "
-            "with consistent accounting signs."
+            f"Your current net P&L balance is {money(profit)}.\n\n"
+            f"{explanation}\n\n"
+            "Would you like to look at the biggest expenses next?"
         )
 
     if intent == "profit_margin":
-        if revenue == 0:
+        margin = net_margin()
+
+        if margin is None:
             return (
-                "I cannot calculate the margin because "
+                "I can't calculate the net margin because "
                 "classified revenue is zero."
             )
 
-        margin = profit / revenue * 100
-
         return (
-            f"**Net margin:** {percent(margin)}\n\n"
-            f"Calculated as net P&L balance ({money(profit)}) "
-            f"divided by classified revenue ({money(revenue)}). "
-            "This is only reliable when the workbook contains "
-            "the relevant P&L accounts and consistent signs."
+            f"Your estimated net margin is {percent(margin)}.\n\n"
+            f"That's calculated as the net P&L balance "
+            f"({money(profit)}) divided by classified revenue "
+            f"({money(revenue)}).\n\n"
+            "This estimate assumes your workbook contains the "
+            "relevant P&L accounts and consistent accounting signs."
         )
 
     if intent == "gross_profit":
-        gross = revenue - cost_of_sales()
+        gross = gross_profit()
 
         if revenue == 0:
-            gross_margin_text = "Not available because revenue is zero."
+            margin_text = "Not available because revenue is zero."
         else:
-            gross_margin_text = percent(gross / revenue * 100)
+            margin_text = percent(gross / revenue * 100)
 
         return (
-            f"**Estimated gross profit:** {money(gross)}\n\n"
-            f"**Estimated gross margin:** {gross_margin_text}\n\n"
-            "This calculation uses classified revenue less "
-            "classified cost of sales. Verify that all relevant "
-            "accounts have been classified correctly."
+            f"Your estimated gross profit is {money(gross)}.\n\n"
+            f"Your estimated gross margin is {margin_text}.\n\n"
+            "I calculated gross profit as net classified revenue "
+            "less classified cost of sales. Please verify the "
+            "account classifications before relying on this figure."
         )
 
     if intent == "top_expenses":
@@ -414,22 +551,26 @@ def answer_question(question):
 
         if top.empty:
             return (
-                "No expense accounts were identified. "
-                "Review the account-classification patterns."
+                "I couldn't identify any classified expense accounts. "
+                "You may need to update the account classification rules."
             )
 
-        lines = ["**Largest classified expense accounts:**"]
+        lines = [
+            "Here are your five largest classified expense accounts:"
+        ]
 
-        for _, row in top.iterrows():
+        for rank, (_, row) in enumerate(top.iterrows(), start=1):
             lines.append(
-                f"- {row['Account']}: "
+                f"{rank}. **{row['Account']}** — "
                 f"{money(row['Expense amount'])}"
             )
 
-        return "\n".join(lines)
+        lines.append(
+            "\nThese amounts assume expenses are stored as negative "
+            "numbers in your source workbook."
+        )
 
-    if intent == "summary":
-        return financial_summary()
+        return "\n\n".join(lines)
 
     if intent == "breakdown":
         grouped = (
@@ -438,103 +579,307 @@ def answer_question(question):
             .sort_values(ascending=False)
         )
 
-        lines = ["**P&L category breakdown (source signs):**"]
+        lines = ["Here's the P&L breakdown by account category:"]
 
         for category, amount in grouped.items():
-            lines.append(f"- {category}: {money(amount)}")
+            lines.append(
+                f"- **{category}:** {money(amount)}"
+            )
 
         lines.append(
             "\nCategories are inferred from account names. "
-            "Review unclassified accounts before relying on this breakdown."
+            "Review the 'Other' category and check your account "
+            "classifications before using this breakdown."
         )
 
-        return "\n".join(lines)
+        return "\n\n".join(lines)
 
-    # Default: search for a matching account.
-    account, score = find_account(question)
+    if intent == "summary":
+        margin = net_margin()
 
-    if score < 0.15:
+        lines = [
+            "Here's a quick overview of your P&L:",
+            f"- **Net classified revenue:** {money(revenue)}",
+            f"- **Classified expenses:** {money(expenses)}",
+            f"- **Net P&L balance:** {money(profit)}",
+        ]
+
+        if margin is not None:
+            lines.append(
+                f"- **Estimated net margin:** {percent(margin)}"
+            )
+
+        top = top_expense_accounts(3)
+
+        if not top.empty:
+            names = ", ".join(top["Account"].tolist())
+            lines.append(
+                f"\nYour largest classified expense accounts "
+                f"include {names}."
+            )
+
+        lines.append(
+            "\nKeep in mind that these figures depend on your "
+            "account classification and source sign convention."
+        )
+
+        return "\n\n".join(lines)
+
+    return None
+
+
+# =========================================================
+# 10. CONTEXT AND FOLLOW-UP QUESTIONS
+# =========================================================
+
+def resolve_followup(question):
+    q = normalize(question)
+    previous_intent = st.session_state.get("last_intent")
+
+    # Short follow-ups inherit the previous topic.
+    if re.search(
+        r"\b(show me the top 3|show me the top three|"
+        r"show me more|tell me more|break it down|"
+        r"break that down|give me details|"
+        r"which ones|yes please|go ahead)\b",
+        q,
+    ):
+        if previous_intent in {"expenses", "summary"}:
+            return "top_expenses"
+
+    if re.search(
+        r"\b(what about expenses|and expenses|"
+        r"how about expenses)\b",
+        q,
+    ):
+        return "expenses"
+
+    if re.search(
+        r"\b(what about revenue|and revenue|"
+        r"how about revenue)\b",
+        q,
+    ):
+        return "revenue"
+
+    if re.search(
+        r"\b(what about profit|and profit|"
+        r"how about profit)\b",
+        q,
+    ):
+        return "net_income"
+
+    if re.search(
+        r"\b(top 3|top three|top 5|top five)\b",
+        q,
+    ) and previous_intent in {"expenses", "summary"}:
+        return "top_expenses"
+
+    return None
+
+
+# =========================================================
+# 11. MAIN QUESTION ANSWER FUNCTION
+# =========================================================
+
+def answer_question(question):
+    followup_intent = resolve_followup(question)
+
+    if followup_intent:
+        intent = followup_intent
+    else:
+        intent = detect_intent(question)
+
+    st.session_state.last_intent = intent
+
+    # Friendly small talk and known financial intents.
+    answer = conversational_answer(intent)
+
+    if answer is not None:
+        return answer
+
+    # Search for an account.
+    account, score, candidates = find_account(question)
+
+    if account is None or score < 0.20:
         return (
-            "I couldn't confidently match that question to an account. "
-            "Try asking about revenue, expenses, profit, gross margin, "
-            "or use the exact account name from your Excel file."
+            "I'm not quite sure which account you're asking about. "
+            "Could you try using the account name from your Excel file?\n\n"
+            "You can also ask about revenue, expenses, net profit, "
+            "gross profit, margin, or financial performance."
+        )
+
+    if score < 0.35:
+        if candidates:
+            suggestions = "\n".join(
+                f"- {name}" for name in candidates
+            )
+
+            return (
+                f"I found a possible match, **{account}**, "
+                "but I'm not confident enough to assume it's correct.\n\n"
+                f"Here are a few accounts you might mean:\n{suggestions}\n\n"
+                "Could you clarify which one you're looking for?"
+            )
+
+        return (
+            "I found a possible match, but I'm not confident "
+            "enough to give you a reliable figure. "
+            "Please try the exact account name."
         )
 
     matches = df[df["Account"] == account]
 
-    if len(matches) == 1:
-        amount = matches["Amount"].sum()
-        category = matches["Category"].iloc[0]
-
-        return (
-            f"**{account}**\n\n"
-            f"Amount: {money(amount)}\n\n"
-            f"Category: {category}\n\n"
-            f"Match confidence (similarity score): {score:.2f}"
-        )
-
-    total = matches["Amount"].sum()
+    amount = matches["Amount"].sum()
+    category = matches["Category"].iloc[0]
 
     return (
-        f"**{account}**\n\n"
-        f"Combined amount across {len(matches)} rows: {money(total)}\n\n"
-        "Multiple rows share this account name."
+        f"I found **{account}** in your P&L.\n\n"
+        f"- **Amount:** {money(amount)}\n"
+        f"- **Category:** {category}\n"
+        f"- **Rows found:** {len(matches)}\n\n"
+        "This amount is the sum of the matching source rows, "
+        "using their original signs."
     )
 
 
-# --------------------------------------------------
-# CHAT INTERFACE
-# --------------------------------------------------
+# =========================================================
+# 12. CHAT INTERFACE
+# =========================================================
 
 if "messages" not in st.session_state:
     st.session_state.messages = []
 
-with st.sidebar:
-    st.subheader("Example questions")
-    st.markdown(
-        """
-        - How much revenue did we make?
-        - Are we profitable?
-        - What are our biggest expenses?
-        - What is our net profit margin?
-        - Calculate gross profit.
-        - Summarize financial performance.
-        - Show the expense breakdown.
-        - How much did we spend on salaries?
-        """
-    )
+if "last_intent" not in st.session_state:
+    st.session_state.last_intent = None
 
-    if st.button("Clear conversation"):
+
+# Sidebar
+with st.sidebar:
+    st.subheader("💬 Try asking")
+
+    examples = [
+        "How much revenue did we make?",
+        "Are we profitable?",
+        "What are our biggest expenses?",
+        "What is our net profit margin?",
+        "Calculate gross profit",
+        "Summarize financial performance",
+        "Show the expense breakdown",
+        "How much did we spend on salaries?",
+    ]
+
+    for example in examples:
+        if st.button(example, key=f"example_{example}", use_container_width=True):
+            st.session_state.pending_question = example
+            st.rerun()
+
+    st.divider()
+
+    if st.button("🗑️ Clear conversation", use_container_width=True):
         st.session_state.messages = []
+        st.session_state.last_intent = None
+        st.session_state.pending_question = None
         st.rerun()
 
-# Display previous messages.
+    st.caption(
+        "Answers are generated locally using Python rules. "
+        "No OpenAI API is used."
+    )
+
+
+# First-time greeting
+if not st.session_state.messages:
+    with st.chat_message("assistant"):
+        st.markdown(
+            "Hi there! 👋 I'm your P&L financial assistant.\n\n"
+            "I can help you understand your revenue, expenses, "
+            "profitability, and account balances.\n\n"
+            "What would you like to explore first?"
+        )
+
+
+# Display conversation history
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-question = st.chat_input("Ask a question about your P&L...")
+
+# Process a question from either the chat box or a sidebar example.
+typed_question = st.chat_input(
+    "Ask me about your P&L...",
+    key="chat_input",
+)
+
+pending_question = st.session_state.pop(
+    "pending_question", None
+)
+
+question = typed_question or pending_question
 
 if question:
     st.session_state.messages.append({
         "role": "user",
-        "content": question
+        "content": question,
     })
 
     with st.chat_message("user"):
         st.markdown(question)
 
-    answer = answer_question(question)
+    with st.chat_message("assistant"):
+        with st.spinner("Looking into your P&L..."):
+            try:
+                answer = answer_question(question)
+            except Exception:
+                answer = (
+                    "Sorry, I couldn't process that question. "
+                    "Please try rephrasing it or asking about "
+                    "revenue, expenses, profit, or an account name."
+                )
+
+        st.markdown(answer)
 
     st.session_state.messages.append({
         "role": "assistant",
-        "content": answer
+        "content": answer,
     })
 
-    with st.chat_message("assistant"):
-        st.markdown(answer)
 
-# Optional: inspect source data.
-with st.expander("View loaded P&L data"):
+# =========================================================
+# 13. DATA INSPECTION
+# =========================================================
+
+with st.expander("📂 View loaded P&L data"):
     st.dataframe(df, use_container_width=True)
+
     st.caption(f"{len(df)} financial rows loaded.")
+
+    st.subheader("Account classification review")
+
+    classification_summary = (
+        df.groupby("Category")
+        .agg(
+            Account_count=("Account", "nunique"),
+            Row_count=("Account", "size"),
+            Source_amount=("Amount", "sum"),
+        )
+        .reset_index()
+    )
+
+    st.dataframe(
+        classification_summary,
+        use_container_width=True,
+    )
+
+    unclassified = df[df["Category"] == "Other"]
+
+    if not unclassified.empty:
+        st.warning(
+            f"{unclassified['Account'].nunique()} unique account(s) "
+            "are classified as Other. Review these accounts before "
+            "relying on the financial summaries."
+        )
+
+        st.dataframe(
+            unclassified[["Account", "Amount"]],
+            use_container_width=True,
+        )
